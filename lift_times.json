@@ -1,0 +1,15 @@
+{
+  "source": "copy of the published Tower Bridge lift list (London Drum listing)",
+  "as_of": "2026-10-13",
+  "note": "Fallback only. Direction and vessel were not in this copy. Refresh from https://www.towerbridge.org.uk/lift-times when you can.",
+  "lifts": [
+    {"date": "2026-11-27", "time": "19:15", "direction": "", "vessel": ""},
+    {"date": "2026-11-27", "time": "20:00", "direction": "", "vessel": ""},
+    {"date": "2026-11-27", "time": "23:15", "direction": "", "vessel": ""},
+    {"date": "2026-11-28", "time": "00:00", "direction": "", "vessel": ""},
+    {"date": "2026-12-05", "time": "18:45", "direction": "", "vessel": ""},
+    {"date": "2026-12-05", "time": "19:30", "direction": "", "vessel": ""},
+    {"date": "2026-12-05", "time": "23:15", "direction": "", "vessel": ""},
+    {"date": "2026-12-06", "time": "00:00", "direction": "", "vessel": ""}
+  ]
+}
