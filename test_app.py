@@ -1,156 +1,159 @@
-"""Tests for your app. Run them with `pytest`.
-
-Keep these. Publishing runs them, and a repository whose tests fail does not
-deploy — which is the fastest feedback you will get all day, because the
-alternative is finding out from a user that your app answers wrongly.
-
-`LocalRunner` is the same code the production runtime uses to call your app.
-So a call that works here works deployed, and — more usefully — a `Result`
-that violates your manifest fails here exactly as it would in production.
-That is the whole reason to test through the runner rather than calling
-`App().handle(...)` directly.
-"""
+"""Tests for Bridge Up. The network is blocked (conftest.py); the live page is
+stubbed through App._fetch, and the fallback uses the bundled lift_times.json."""
 
 from __future__ import annotations
 
+import urllib.error
 from datetime import datetime, timezone
 
 import pytest
-from pippa_agentapp_sdk import LocalRunner, OutputShapeViolation
+from pippa_agentapp_sdk import LocalRunner, OutputShapeViolation, Result
 
-from app import App, CannotReadDate
+from app import App, CannotReadDay, CannotReadTime, parse_lift_page
 
-# A fixed "now", so a test that passes today still passes next March.
-# 21:00 UTC on purpose: it is already the next day in New Zealand, which is
-# what makes the time zone test below mean anything. At 09:00 UTC it is still
-# the same day everywhere that matters, and the test would pass whether or not
-# the code handled time zones at all.
-NOW = datetime(2026, 10, 22, 21, 0, tzinfo=timezone.utc)
+# Friday 20 November 2026, 15:00 London.
+NOW = datetime(2026, 11, 20, 15, 0, tzinfo=timezone.utc)
+
+PAGE = """
+<div class="time-table"><h3 class="time-table__heading">Tuesday 24 November 2026</h3>
+  <div class="bridge-lift-row"><div class="inner">
+    <p><strong>13:45</strong> Upriver</p><p><strong>Thames Barge Centaur</strong></p>
+  </div></div></div>
+<div class="time-table"><h3 class="time-table__heading">Wednesday 25 November 2026</h3>
+  <div class="bridge-lift-row"><p><strong>18:00</strong> Upriver</p>
+    <p><strong>Paddle Steamer Dixie Queen</strong></p></div>
+  <div class="bridge-lift-row"><p><strong>18:45</strong> Downriver</p>
+    <p><strong>Paddle Steamer Dixie Queen</strong></p></div></div>
+<div class="time-table"><h3 class="time-table__heading">Saturday 21 November 2026</h3>
+  <div class="bridge-lift-row"><p><strong>10:30</strong> Downriver</p>
+    <p><strong>HMS Example</strong></p></div></div>
+"""
 
 
-def call(inputs: dict, outcome: str = "days.until", *, explicit: bool = False):
-    """Run one outcome the way the runtime does, and return the Result.
+def live(url, timeout=5.0):
+    return PAGE.encode()
 
-    `granted_secrets` is required even though a hackathon app never has any —
-    the runner takes it on every call, so an empty dict is how you say "none".
 
-    `explicit=True` calls the app the way Pippa does when the person picked
-    it by name (`@Days Until ...`) instead of Pippa choosing it. The app sees
-    it as `call.context.explicit`.
-    """
-    return LocalRunner(App()).call(
-        outcome, inputs, granted_secrets={}, now=NOW, request_id="test-1",
-        explicit=explicit,
+def blocked(url, timeout=5.0):
+    raise urllib.error.URLError("blocked")
+
+
+def timed_out(url, timeout=5.0):
+    raise TimeoutError("slow")
+
+
+def call(inputs, fetch=live, *, explicit=False):
+    app = App()
+    app._fetch = fetch
+    return LocalRunner(app).call(
+        "bridge.lifts", inputs, granted_secrets={}, now=NOW,
+        request_id="t1", explicit=explicit,
     ).result
 
 
-def test_the_manifest_is_valid():
-    """The first thing to break, and the easiest to miss.
-
-    `App()` validates manifest.yaml as it is constructed, so this fails the
-    moment the manifest is malformed — before anything else has a chance to
-    produce a more confusing error.
-    """
+def test_manifest_is_valid():
     app = App()
-    assert app.manifest.app_id.startswith("hack.")
-    assert [o.id for o in app.manifest.outcomes] == ["days.until"]
+    assert app.manifest.app_id == "hack.app_4a39"
+    assert [o.id for o in app.manifest.outcomes] == ["bridge.lifts"]
 
 
-def test_it_counts_the_days():
-    result = call({"date": "2026-12-25"})
-    assert result.data["days"] == 64
-    assert result.data["target_date"] == "2026-12-25"
-    assert result.data["weekday"] == "Friday"
-    assert result.data["already_passed"] is False
+def test_parser_reads_date_time_direction_and_vessel():
+    lifts = parse_lift_page(PAGE)
+    assert len(lifts) == 4
+    first = lifts[1]
+    assert first.when.strftime("%Y-%m-%d %H:%M") == "2026-11-24 13:45"
+    assert first.direction == "Upriver"
+    assert first.vessel == "Thames Barge Centaur"
 
 
-def test_a_date_written_in_words_works():
-    result = call({"date": "25 December"})
-    assert result.data["target_date"] == "2026-12-25"
+def test_parser_ignores_a_page_with_no_lifts():
+    assert parse_lift_page("<html><body>Maintenance</body></html>") == []
 
 
-def test_a_date_already_gone_rolls_to_next_year():
-    """`1 January` asked in October means the January that is coming."""
-    result = call({"date": "1 January"})
-    assert result.data["target_date"] == "2027-01-01"
-    assert result.data["already_passed"] is False
+def test_next_lift_with_no_day():
+    d = call({}).data
+    assert d["next_lift_date"] == "2026-11-21"
+    assert d["next_lift_time"] == "10:30"
+    assert d["direction"] == "Downriver"
+    assert d["vessel"] == "HMS Example"
+    assert d["source"] == "towerbridge.org.uk lift list"
 
 
-def test_the_users_timezone_decides_what_today_is():
-    """21:00 UTC is already tomorrow in Auckland.
-
-    Worth a test of its own: it is the bug every date app has, it only shows
-    up for users in some parts of the world, and it is invisible if you only
-    ever test from one place.
-    """
-    here = call({"date": "2026-10-23"}).data["days"]
-    there = call({"date": "2026-10-23", "timezone": "Pacific/Auckland"}).data["days"]
-    assert here == 1    # still the 22nd in UTC
-    assert there == 0   # already the 23rd in Auckland
+def test_lifts_on_a_named_weekday():
+    r = call({"day": "Wednesday"})
+    assert r.data["lifts_on_requested_day"] == [
+        "Wed 25 Nov 18:00 Upriver · Paddle Steamer Dixie Queen",
+        "Wed 25 Nov 18:45 Downriver · Paddle Steamer Dixie Queen",
+    ]
+    assert "2 lifts" in r.narrative
 
 
-def test_a_made_up_timezone_never_reaches_the_app():
-    """The platform checks declared types before your code runs.
-
-    `type: timezone` in the manifest means the runtime validates it. So your
-    app does not need to — and should not, because a hand-rolled check here
-    would be dead code that looks load-bearing.
-    """
-    from pippa_agentapp_sdk import InputShapeViolation
-
-    with pytest.raises(InputShapeViolation):
-        call({"date": "2026-12-25", "timezone": "Mars/Olympus"})
+def test_this_weekend_covers_saturday_and_sunday():
+    d = call({"day": "this weekend"}).data
+    assert d["lifts_on_requested_day"] == ["Sat 21 Nov 10:30 Downriver · HMS Example"]
 
 
-def test_no_date_is_an_error_a_user_can_read():
-    with pytest.raises(CannotReadDate) as failure:
-        call({"date": ""})
-    # `user_message` is the only part a user may be shown, so it is the part
-    # worth asserting on. The rest stays in the logs.
-    assert failure.value.user_message == "I could not work out which date you meant."
+def test_a_date_in_words():
+    d = call({"day": "24 November"}).data
+    assert d["lifts_on_requested_day"][0].startswith("Tue 24 Nov 13:45")
 
 
-def test_nonsense_is_refused_rather_than_guessed():
-    with pytest.raises(CannotReadDate):
-        call({"date": "a week on Thursday-ish"})
+def test_a_day_with_no_lifts_gives_the_next_one():
+    r = call({"day": "Monday"})
+    assert r.data["lifts_on_requested_day"] == []
+    assert r.data["next_lift_date"] == "2026-11-24"
+    assert "No lifts are listed for Monday" in r.narrative
 
 
-def test_picked_by_name_it_answers_and_refuses_as_usual():
-    """`@Days Until ...` in the chat: the person picked this app themselves.
-
-    Then nothing checks whether the message suits the app. It is called
-    whatever the words, and `call.context.explicit` is True. The right
-    response is the ordinary one: answer what you can, and refuse only for a
-    missing or unreadable input, with a sentence that says what was wrong.
-    Never refuse because the message does not look like your example phrases
-    — the person has already told you it is for you.
-
-    This app never reads the flag, because it never needed to: it already
-    refuses only for a missing or unreadable date. If yours does, read it as
-    `getattr(call.context, "explicit", False)`. An app published before the
-    platform update that added the flag runs on an SDK that does not have
-    it, until you publish it again.
-    """
-    picked = call({"date": "2026-12-25"}, explicit=True)
-    assert picked.data == call({"date": "2026-12-25"}).data
-
-    with pytest.raises(CannotReadDate) as failure:
-        call({"date": ""}, explicit=True)
-    assert failure.value.user_message == "I could not work out which date you meant."
+def test_up_at_requested_time_true():
+    d = call({"day": "Wednesday", "time": "6pm"}).data
+    assert d["up_at_requested_time"] is True
 
 
-def test_the_runner_enforces_the_manifest(monkeypatch):
-    """Proof that the contract is real, and the reason to test through it.
+def test_up_at_requested_time_false():
+    d = call({"day": "Wednesday", "time": "3pm"}).data
+    assert d["up_at_requested_time"] is False
 
-    An app returning a field it did not declare is refused. You will meet this
-    error if you add something to `data` and forget to add it to `output` in
-    manifest.yaml — which is the single most common way a first app fails
-    after it deploys.
-    """
-    from pippa_agentapp_sdk import Result
 
-    monkeypatch.setattr(
-        App, "handle", lambda self, c: Result(data={"surprise": "hello"})
-    )
+def test_24_hour_time_is_read():
+    d = call({"day": "Wednesday", "time": "18:45"}).data
+    assert d["up_at_requested_time"] is True
+
+
+def test_falls_back_to_bundled_list_when_site_blocked():
+    d = call({}, fetch=blocked).data
+    assert d["source"].startswith("published list as of")
+    assert d["next_lift_date"] == "2026-11-27"
+    assert "vessel" not in d
+
+
+def test_falls_back_on_timeout():
+    d = call({}, fetch=timed_out).data
+    assert d["as_of"] == "2026-10-13"
+
+
+def test_falls_back_when_live_page_has_no_lifts():
+    d = call({}, fetch=lambda u, timeout=5.0: b"<html></html>").data
+    assert d["source"].startswith("published list")
+
+
+def test_unknown_day_is_a_friendly_error():
+    with pytest.raises(CannotReadDay) as failure:
+        call({"day": "Narnia day"})
+    assert "which day" in failure.value.user_message
+
+
+def test_bad_time_is_a_friendly_error():
+    with pytest.raises(CannotReadTime) as failure:
+        call({"time": "half past blah"})
+    assert "6pm" in failure.value.user_message
+
+
+def test_picked_by_name_answers_the_same():
+    assert call({}, explicit=True).data == call({}).data
+
+
+def test_runner_enforces_the_manifest(monkeypatch):
+    monkeypatch.setattr(App, "handle", lambda self, c: Result(data={"surprise": 1}))
     with pytest.raises(OutputShapeViolation):
-        call({"date": "2026-12-25"})
+        call({})
