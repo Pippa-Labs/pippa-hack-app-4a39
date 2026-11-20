@@ -61,3 +61,7 @@ first clause names the fact.
 - If the site's HTML changes, the parser finds nothing and the app falls back
   to the snapshot.
 - Scheduled lifts can be cancelled at short notice. Every answer says so.
+
+## Notes
+
+- Republished from GitHub with a private no-reply commit address.
